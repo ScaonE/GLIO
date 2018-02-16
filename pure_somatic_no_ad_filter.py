@@ -23,8 +23,8 @@ if len(sys.argv) != 4:
 ### Keep_legit ###
 ##################
 # Load variants into a dataframe
-#variants_df = pd.read_csv(sys.argv[1], sep='\t')
-var_df = pd.read_csv('./all.tsv', sep='\t')
+var_df = pd.read_csv(sys.argv[1], sep='\t')
+#var_df = pd.read_csv('./all.tsv', sep='\t')
 # df_var contains among others flags "alt_allele_in_normal" & "multi_event_alt_allele_in_normal", remove associated variants if Allele_Frequency_Normal > 0.01 (1%)
 var1_df = var_df[(var_df.Flag == 'PASS') | (var_df.Allele_Frequency_Normal <= 0.01)]
 # Remove if potential contamination for the call
@@ -44,8 +44,8 @@ var7_df = var6_df[~var6_df.Amplicon_position.str.contains('position')]
 # Then for InDel, remove variants which may originate from Ion Proton homopolymer biais
 # Ressources : goo.gl/sbjx4t, goo.gl/uMEMXq
 # Nb : No Type = MNP or CLUMPED in our data, thus we don' try to handle them
-#hg19_faidx = Fasta(sys.argv[2], sequence_always_upper=True)
-hg19_faidx = Fasta('../../Data/Hg19/ucsc.hg19.fasta', sequence_always_upper=True)
+hg19_faidx = Fasta(sys.argv[2], sequence_always_upper=True)
+#hg19_faidx = Fasta('../../Data/Hg19/ucsc.hg19.fasta', sequence_always_upper=True)
 var7_df.insert(len(var7_df.columns), 'Context_Var', None)
 var7_df.insert(len(var7_df.columns), 'Context_Ref', None)
 var7_snp_df = var7_df[var7_df.Type.str.contains('SNP')]
@@ -87,8 +87,8 @@ for index, row in var7_del_df.iterrows():
 var8_df = var7_df.drop(drop_indel_set)
 
 # In initial BAM, we want enough depth (>= 100) in associated CTI/TT (computed with GATK DepthOfCoverage) and we report this depth in a new column named "Reads_Other_Tumor"
-#depth_df = pd.read_csv(sys.argv[3], sep='\t')
-depth_df = pd.read_csv('../0_Controls/depth_per_position.csv', sep='\t')
+depth_df = pd.read_csv(sys.argv[3], sep='\t')
+#depth_df = pd.read_csv('../0_Controls/depth_per_position.csv', sep='\t')
 drop_depth_set = set()
 var8_df.insert(len(var8_df.columns), 'Reads_Other_Tumor', None)
 coherence_name_table={'108885':'p1','12A13991':'p2','12A17639':'p3','14A02580':'p4','14A13198':'p5','14A13351':'p6','15A14':'p7','15A04217':'p8','15A12637':'p9','15A18359':'p10','10016297':'p11','14A15780':'p12','14A19434':'p13'}
@@ -222,30 +222,73 @@ TT_spe_df = tissu_spe_best_srt_df[tissu_spe_best_srt_df['Tissu(TT|CTI)'] == 'TT'
 CTI_spe_df.to_csv('./pure_somatic_no_AD_filter_CTI_spe.tsv', sep='\t', index=False)
 TT_spe_df.to_csv('./pure_somatic_no_AD_filter_TT_spe.tsv', sep='\t', index=False)
 
+
 ####################
 ### Seen_in_both ###
 ####################
-# Temp otuput of raw data
+# Create seen_in_both df & multii
 both_legit_df = legit_df.loc[both_idx_set]
-both_legit_df = both_legit_df[['Patient', 'Chrom', 'Position', 'Ref', 'Var', 'Allele_Frequency_Tumor', 'Gene_ID', 'Func', 'Exo_func', 'AAChange', 'Cosmic', 'Clinvar (CLINSIG/CLNDBN/CLNACC/CLNDSDB/CLNDSDBID)', 'Flag', 'Occurence_of_this_legit_event(max 4)', 'Seen_in_non-legit_2nd_tissu(max 4)', 'Type', 'Context_Ref', 'Context_Var', 'Amplicon_position', 'AD_Tumor_Ref', 'AD_Tumor_Alt', 'Reads_Tumor', 'Reads_Other_Tumor', 'Tumor_Ref+', 'Tumor_Ref-', 'Tumor_Alt+', 'Tumor_Alt-', 'Allele_Frequency_Normal', 'AD_Normal_Ref', 'AD_Normal_Alt', 'Reads_Normal', 'Normal_Ref+', 'Normal_Ref-', 'Normal_Alt+', 'Normal_Alt-', 'Version(1|2)', 'MinPruning', 'Tissu(TT|CTI)', 'Cytoband', 'Contamination']]
-both_legit_srt_df = both_legit_df.sort_values(['Patient', 'Chrom', 'Position'], ascending=[True, True, True])
-both_legit_srt_df.to_csv('./pure_somatic_no_AD_filter_in_both_tumors.tsv', sep='\t', index=False)
+# Add index value as the last column in both_legit_df
+both_legit_df.insert(len(both_legit_df.columns), 'Index_cheat', None)
+for index, row in both_legit_df.iterrows():
+	both_legit_df.at[index, 'Index_cheat'] = index
 
-# Do better stuff here : multiindex try
-#both_legit_idx_df = both_legit_df.set_index(['Patient', 'Chrom', 'Position'])
-#both_legit_idx_df = both_legit_idx_df.sort_index()
-#for index, row in both_legit_idx_df.iterrows():
-#	print(index)
-#	print(len(row))
+# Create multiindex with long_key for fast querying
+both_legit_idx_df = both_legit_df.set_index(['Patient', 'Chrom', 'Position', 'Tissu(TT|CTI)'])
+both_legit_idx_df = both_legit_idx_df.sort_index()
+# For each variant in both_legit_df, if its AF is 40% > AF value in associated tumoral tissu occurence, this become a candidate CTI-TT pair (indexes pair) for best variant-pair
+pair_of_idxs = []
+for index, row in both_legit_df.iterrows():
+	current_af = row['Allele_Frequency_Tumor']
+	current_idx = index
+	if (row['Tissu(TT|CTI)'] == 'TT'):
+		# Retrieve all associated CTI variants in a temp df
+		temp_cti_df = both_legit_idx_df.loc[row['Patient'], row['Chrom'], row['Position'], 'CTI'].reset_index()
+		# Iterate over those CTI variants & check if current TT_AF > 40% CTI_AF
+		for i, r in temp_cti_df.iterrows():
+			if current_af > (r['Allele_Frequency_Tumor'] + (r['Allele_Frequency_Tumor']*40/100)):
+				pair_of_idxs.append([current_idx, r['Index_cheat']])
+	else:
+		# Retrieve all associated TT variants in a temp df
+		temp_tt_df = both_legit_idx_df.loc[row['Patient'], row['Chrom'], row['Position'], 'TT'].reset_index()
+		# Iterate over those TT variants & check if current CTI_AF > 40% TT_AF
+		for i, r in temp_tt_df.iterrows():
+			if current_af > (r['Allele_Frequency_Tumor'] + (r['Allele_Frequency_Tumor']*40/100)):
+				pair_of_idxs.append([current_idx, r['Index_cheat']])
 
-# Do better stuff here : regular try with inc heavy dics
-#for index, row in both_legit_df.iterrows():
-#	long_key = str(row['Patient']) + '_' + str(row['Chrom']) + '_' + str(row['Position']) + '_' + str(row['Tissu(TT|CTI)'])
-#	long_key_other = ''
-#	if (row['Tissu(TT|CTI)'] == 'TT'):
-#		long_key_other = '_'.join(map(str,parts[:-1])) + '_CTI'
-#	else:
-#		long_key_other = '_'.join(map(str,parts[:-1])) + '_TT'
+best_pair_dic = {}
+for pair in pair_of_idxs:
+	long_key = str(both_legit_df.loc[pair[0]].Patient) + '_' + str(both_legit_df.loc[pair[0]].Chrom) + '_' + str(both_legit_df.loc[pair[0]].Position)
+	if long_key in best_pair_dic:
+		# Need to check if our current pair is better than king pair
+		king_has_same_ver_prun, current_has_same_ver_prun = False, False
+		# Check if king pair has same version + pruning
+		if (both_legit_df.loc[best_pair_dic[long_key][0]]['Version(1|2)'] == both_legit_df.loc[best_pair_dic[long_key][1]]['Version(1|2)']) and (both_legit_df.loc[best_pair_dic[long_key][0]].MinPruning == both_legit_df.loc[best_pair_dic[long_key][1]].MinPruning):
+			king_has_same_ver_prun = True
+		# Check if current pair has same version + pruning
+		if (both_legit_df.loc[pair[0]]['Version(1|2)'] == both_legit_df.loc[pair[1]]['Version(1|2)']) and (both_legit_df.loc[pair[0]].MinPruning == both_legit_df.loc[pair[1]].MinPruning):
+			current_has_same_ver_prun = True
+		# If king is not same ver_prun and current one is, current becomes king
+		if not king_has_same_ver_prun and current_has_same_ver_prun:
+			best_pair_dic[long_key] = pair
+		# We could filter even deeper if both are True (check Flag, AF, Depth...)
+	# If long_key not seen yet, current pair automatically become "king" pair for this long_key
+	else:
+		best_pair_dic[long_key] = pair
+
+# Remove dirty Index_cheat column
+both_legit_df = both_legit_df.drop('Index_cheat', axis=1)
+# Create df containing only kings
+kings_set = set()
+for key, value in best_pair_dic.items():
+	kings_set.add(value[0])
+	kings_set.add(value[1])
+
+kings_df = both_legit_df.loc[kings_set]
+# Output result
+kings_df = kings_df[['Patient', 'Chrom', 'Position', 'Ref', 'Var', 'Allele_Frequency_Tumor', 'Gene_ID', 'Func', 'Exo_func', 'AAChange', 'Cosmic', 'Clinvar (CLINSIG/CLNDBN/CLNACC/CLNDSDB/CLNDSDBID)', 'Flag', 'Occurence_of_this_legit_event(max 4)', 'Seen_in_non-legit_2nd_tissu(max 4)', 'Type', 'Context_Ref', 'Context_Var', 'Amplicon_position', 'AD_Tumor_Ref', 'AD_Tumor_Alt', 'Reads_Tumor', 'Reads_Other_Tumor', 'Tumor_Ref+', 'Tumor_Ref-', 'Tumor_Alt+', 'Tumor_Alt-', 'Allele_Frequency_Normal', 'AD_Normal_Ref', 'AD_Normal_Alt', 'Reads_Normal', 'Normal_Ref+', 'Normal_Ref-', 'Normal_Alt+', 'Normal_Alt-', 'Version(1|2)', 'MinPruning', 'Tissu(TT|CTI)', 'Cytoband', 'Contamination']]
+kings_srt_df = kings_df.sort_values(['Patient', 'Chrom', 'Position'], ascending=[True, True, True])
+kings_srt_df.to_csv('./pure_somatic_no_AD_filter_in_both_tumors.tsv', sep='\t', index=False)
 
 ###########################
 ### Seen_across_samples ###
@@ -289,7 +332,7 @@ for index, row in across_samples_legit_df.iterrows():
 across_samples_legit_df = across_samples_legit_df.drop(['Occurence_of_this_legit_event(max 4)', 'Seen_in_non-legit_2nd_tissu(max 4)'], axis=1)
 
 # Output across_samples variants with columns sorting
-across_samples_all_df = across_samples_all_df[['Occurence_in_all_patients_and_tumors', 'Patient', 'Chrom', 'Position', 'Ref', 'Var', 'Allele_Frequency_Tumor', 'Gene_ID', 'Func', 'Exo_func', 'AAChange', 'Cosmic', 'Clinvar (CLINSIG/CLNDBN/CLNACC/CLNDSDB/CLNDSDBID)', 'Flag', 'Occurence_of_this_legit_event(max 4)', 'Seen_in_non-legit_2nd_tissu(max 4)', 'Type', 'Amplicon_position', 'AD_Tumor_Ref', 'AD_Tumor_Alt', 'Reads_Tumor', 'Tumor_Ref+', 'Tumor_Ref-', 'Tumor_Alt+', 'Tumor_Alt-', 'Allele_Frequency_Normal', 'AD_Normal_Ref', 'AD_Normal_Alt', 'Reads_Normal', 'Normal_Ref+', 'Normal_Ref-', 'Normal_Alt+', 'Normal_Alt-', 'Version(1|2)', 'MinPruning', 'Tissu(TT|CTI)', 'Cytoband', 'Contamination']]
+across_samples_all_df = across_samples_all_df[['Occurence_in_all_patients_and_tumors', 'Patient', 'Chrom', 'Position', 'Ref', 'Var', 'Allele_Frequency_Tumor', 'Gene_ID', 'Func', 'Exo_func', 'AAChange', 'Cosmic', 'Clinvar (CLINSIG/CLNDBN/CLNACC/CLNDSDB/CLNDSDBID)', 'Flag', 'Type', 'Amplicon_position', 'AD_Tumor_Ref', 'AD_Tumor_Alt', 'Reads_Tumor', 'Tumor_Ref+', 'Tumor_Ref-', 'Tumor_Alt+', 'Tumor_Alt-', 'Allele_Frequency_Normal', 'AD_Normal_Ref', 'AD_Normal_Alt', 'Reads_Normal', 'Normal_Ref+', 'Normal_Ref-', 'Normal_Alt+', 'Normal_Alt-', 'Version(1|2)', 'MinPruning', 'Tissu(TT|CTI)', 'Cytoband', 'Contamination']]
 across_samples_legit_df = across_samples_legit_df[['Occurence_in_all_patients_and_tumors', 'Patient', 'Chrom', 'Position', 'Ref', 'Var', 'Allele_Frequency_Tumor', 'Gene_ID', 'Func', 'Exo_func', 'AAChange', 'Cosmic', 'Clinvar (CLINSIG/CLNDBN/CLNACC/CLNDSDB/CLNDSDBID)', 'Flag', 'Type', 'Context_Ref', 'Context_Var', 'Amplicon_position', 'AD_Tumor_Ref', 'AD_Tumor_Alt', 'Reads_Tumor', 'Reads_Other_Tumor', 'Tumor_Ref+', 'Tumor_Ref-', 'Tumor_Alt+', 'Tumor_Alt-', 'Allele_Frequency_Normal', 'AD_Normal_Ref', 'AD_Normal_Alt', 'Reads_Normal', 'Normal_Ref+', 'Normal_Ref-', 'Normal_Alt+', 'Normal_Alt-', 'Version(1|2)', 'MinPruning', 'Tissu(TT|CTI)', 'Cytoband', 'Contamination']]
 
 across_samples_all_srt_df = across_samples_all_df.sort_values(['Chrom', 'Position'], ascending=[True, True])
