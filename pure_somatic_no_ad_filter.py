@@ -31,7 +31,7 @@ var1_df = var_df[(var_df.Flag == 'PASS') | (var_df.Allele_Frequency_Normal <= 0.
 var2_df = var1_df[var1_df.Contamination != 'plausible']
 # Need initial BAM depth > 99 for both tumor_sample & normal_sample
 var3_df = var2_df[(var2_df.Reads_Tumor > 99) & (var2_df.Reads_Normal > 99)]
-# Need AF > 0.1 (10%), otherwise it's problematic to validate in Sanger
+# Need AF >= 0.1 (10%), otherwise it's problematic to validate in Sanger
 var4_df = var3_df[var3_df.Allele_Frequency_Tumor >= 0.1]
 # Need alt-allele depth in tumor >= 10 (MuTect2) (with Sanger in mind too)
 var5_df = var4_df[var4_df.AD_Tumor_Alt > 9]
@@ -43,7 +43,7 @@ var7_df = var6_df[~var6_df.Amplicon_position.str.contains('position')]
 # Get -3/+3 genome context for Ref & Var (pyfaidx module) and report it in new columns
 # Then for InDel, remove variants which may originate from Ion Proton homopolymer biais
 # Ressources : goo.gl/sbjx4t, goo.gl/uMEMXq
-# Nb : No Type = MNP or CLUMPED in our data, thus we don' try to handle them
+# Nb : No Type = MNP or CLUMPED in our data, thus we don't try to handle them
 hg19_faidx = Fasta(sys.argv[2], sequence_always_upper=True)
 #hg19_faidx = Fasta('../../Data/Hg19/ucsc.hg19.fasta', sequence_always_upper=True)
 var7_df.insert(len(var7_df.columns), 'Context_Var', None)
@@ -112,21 +112,18 @@ legit_df = var8_df.drop(drop_depth_set)
 ###########################
 print(var_df.shape, depth_df.shape, len(var1_df), len(var2_df), len(var3_df), len(var4_df), len(var5_df), len(var6_df), len(var7_df), len(var8_df), len(legit_df))
 
-#####################
-### CTI_or_TT_spe ###
-#####################
-## Has to be done in a patient + variant_position specific manner
+########################################################
+### Add 2 columns : Occurence of legit and non-legit ###
+########################################################
 # Create non-legit dic
 non_legit_df = var_df.drop(set(legit_df.index.values.tolist()))
-# For non_legit_df, use .groupby() to get some kind of "multiindex" on long_key, then count the number of element for each long_key, store result in a dic with key = long_key (Patient_Chrom_Position_Tissu) and value = count (1->4)
-long_key_non_legit_dic = {}
+# For non_legit_df, use .groupby() to get some kind of "multiindex" on long_key, then count the number of element for each long_key with .size()
 non_legit_series = non_legit_df.groupby(['Patient', 'Chrom', 'Position', 'Tissu(TT|CTI)'])['Version(1|2)'].size()
+# Given that I dislike series, transpose infos into a dic with key = long_key (Patient_Chrom_Position_Tissu) and value = count (1->4)
+long_key_non_legit_dic = {}
 for index, value in non_legit_series.iteritems():
 	long_key = '_'.join(map(str, index))
-	if long_key in long_key_non_legit_dic:
-		long_key_non_legit_dic[long_key]+=1
-	else:
-		long_key_non_legit_dic[long_key]=1
+	long_key_non_legit_dic[long_key] = value
 
 # Create long_key_legit_dic for legit_df, with value = count (1->4)
 # And long_key_legit_seen_in_non_dic to store number of associated non-legit variants in the other tumor sample
@@ -165,7 +162,11 @@ for index, row in legit_df.iterrows():
 	legit_df.at[index, 'Seen_in_non-legit_2nd_tissu(max 4)'] = long_key_legit_seen_in_non_dic[long_key]
 	legit_df.at[index, 'Occurence_of_this_legit_event(max 4)'] = long_key_legit_dic[long_key]
 
-# Create a set containing events seen in the other tumoral tissu for the same Patient_Chrom_Position (checked for each event in legit_df)
+#####################
+### CTI_or_TT_spe ###
+#####################
+## Has to be done in a patient + variant_position specific manner
+# Create a set containing legit events seen in the other tumoral tissu for the same Patient_Chrom_Position (checked for each event in legit_df)
 both_idx_set = set()
 for index, row in legit_df.iterrows():
 	if (row['Tissu(TT|CTI)'] == 'TT'):
@@ -222,11 +223,10 @@ TT_spe_df = tissu_spe_best_srt_df[tissu_spe_best_srt_df['Tissu(TT|CTI)'] == 'TT'
 CTI_spe_df.to_csv('./pure_somatic_no_AD_filter_CTI_spe.tsv', sep='\t', index=False)
 TT_spe_df.to_csv('./pure_somatic_no_AD_filter_TT_spe.tsv', sep='\t', index=False)
 
-
 ####################
 ### Seen_in_both ###
 ####################
-# Create seen_in_both df & multii
+# Create seen_in_both df
 both_legit_df = legit_df.loc[both_idx_set]
 # Add index value as the last column in both_legit_df
 both_legit_df.insert(len(both_legit_df.columns), 'Index_cheat', None)
@@ -298,10 +298,10 @@ kings_srt_df.to_csv('./pure_somatic_no_AD_filter_in_both_tumors.tsv', sep='\t', 
 occ_all_series = var_df.groupby(['Chrom', 'Position'])['Version(1|2)'].size()
 occ_legit_series = legit_df.groupby(['Chrom', 'Position'])['Reads_Normal'].size()
 # Define top quantile and add True to variants greater than (gt) quantile
+# We use different stringencies for "all" and "legit" (because we have much more occurences in "all")
 top_quantile_all_series = occ_all_series.gt(occ_all_series.quantile(q=0.9975, interpolation='higher'))
-
 top_quantile_legit_series = occ_legit_series.gt(occ_legit_series.quantile(q=0.9, interpolation='nearest'))
-# Remove variants being False in top_quantile series (cool synthax)
+# Remove variants being False in top_quantile series (cool syntax)
 top_quantile_all_series = top_quantile_all_series[top_quantile_all_series]
 top_quantile_legit_series = top_quantile_legit_series[top_quantile_legit_series]
 # In the occurence series, keep only chr+pos keys being True in top_quantile series
